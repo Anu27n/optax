@@ -87,6 +87,34 @@ class FactorizedTest(parameterized.TestCase):
     updates, _ = jax.jit(opt.update)(grads, state, params)
     test_utils.assert_trees_all_equal(updates, jnp.zeros_like(grads))
 
+  @parameterized.product(
+      factorized_dims=(True, False), grad_value=(0.0, 1e-4)
+  )
+  def test_small_float16_gradients_are_finite(
+      self, factorized_dims: bool, grad_value: float
+  ):
+    """Zero and small float16 gradients must not produce NaN or Inf.
+
+    In float16 both the default epsilon (1e-30) and the square of a 1e-4
+    gradient underflow to zero, which used to give 0 * inf or 0 / 0.
+    """
+    if factorized_dims:
+      # The updates are factored only for large enough parameters
+      # default min_dim_size_to_factor is 128 so we use 129 here.
+      shape = (129, 129)
+    else:
+      shape = (4,)
+    params = jnp.zeros(shape, dtype=jnp.float16)
+    grads = jnp.full(shape, grad_value, dtype=jnp.float16)
+    scaler = factorized.scale_by_factored_rms()
+    state = jax.jit(scaler.init)(params)
+    updates, state = jax.jit(scaler.update)(grads, state, params)
+    test_utils.assert_tree_all_finite((updates, state))
+    test_utils.assert_trees_all_equal_dtypes(updates, grads)
+    # The first step divides by the gradient rms, so a constant gradient
+    # maps to its sign.
+    test_utils.assert_trees_all_close(updates, jnp.sign(grads))
+
 
 if __name__ == '__main__':
   absltest.main()

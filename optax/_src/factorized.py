@@ -169,6 +169,17 @@ def scale_by_factored_rms(
       shape, dtype = param.shape, param.dtype
       decay_rate_t = decay_rate_fn(step - step_offset, decay_rate)
 
+      # Compute the second-moment statistics in at least float32. In float16
+      # the default epsilon (1e-30) and the squares of small gradients
+      # underflow to zero, which turns the update into 0 * inf or 0 / 0 = NaN.
+      # State and updates are cast back so their dtypes are unchanged.
+      update_dtype = jnp.promote_types(grad.dtype, dtype)
+      stats_dtype = jnp.promote_types(update_dtype, jnp.float32)
+      grad = grad.astype(stats_dtype)
+      grad_sqr = numerics.abs_sq(grad) + jnp.asarray(
+          epsilon, jnp.finfo(stats_dtype).dtype
+      )
+
       # Scaled by factorized second moment statistics.
       new_v_row = jnp.zeros((1,), dtype=dtype)
       new_v_col = jnp.zeros((1,), dtype=dtype)
@@ -177,15 +188,12 @@ def scale_by_factored_rms(
       factored_dims = _factored_dims(shape, factored, min_dim_size_to_factor)
       if factored_dims is not None:
         d1, d0 = factored_dims
-        grad_sqr = numerics.abs_sq(grad) + epsilon
-        new_v_row = decay_rate_t * v_row + (1.0 - decay_rate_t) * jnp.mean(
-            grad_sqr, axis=d0
-        )
-        new_v_col = decay_rate_t * v_col + (1.0 - decay_rate_t) * jnp.mean(
-            grad_sqr, axis=d1
-        )
-        new_v_row = new_v_row.astype(dtype)
-        new_v_col = new_v_col.astype(dtype)
+        new_v_row = decay_rate_t * v_row.astype(stats_dtype) + (
+            1.0 - decay_rate_t
+        ) * jnp.mean(grad_sqr, axis=d0)
+        new_v_col = decay_rate_t * v_col.astype(stats_dtype) + (
+            1.0 - decay_rate_t
+        ) * jnp.mean(grad_sqr, axis=d1)
         reduced_d1 = d1 - 1 if d1 > d0 else d1
         row_col_mean = jnp.mean(new_v_row, axis=reduced_d1, keepdims=True)
         row_factor = (new_v_row / row_col_mean) ** -0.5
@@ -195,12 +203,16 @@ def scale_by_factored_rms(
             * jnp.expand_dims(row_factor, axis=d0)
             * jnp.expand_dims(col_factor, axis=d1)
         )
+        new_v_row = new_v_row.astype(dtype)
+        new_v_col = new_v_col.astype(dtype)
       else:
-        grad_sqr = numerics.abs_sq(grad) + epsilon
-        new_v = decay_rate_t * v + (1.0 - decay_rate_t) * grad_sqr
-        new_v = new_v.astype(dtype)
+        new_v = decay_rate_t * v.astype(stats_dtype) + (
+            1.0 - decay_rate_t
+        ) * grad_sqr
         update = grad * (new_v) ** -0.5
+        new_v = new_v.astype(dtype)
 
+      update = update.astype(update_dtype)
       return _UpdateResult(update, new_v_row, new_v_col, new_v)
 
     # Transform grad and compute new per-parameter stats.
